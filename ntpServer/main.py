@@ -1,46 +1,97 @@
 from fastapi import FastAPI
 import ntplib
-from datetime import timezone, datetime
-import pytz
+import pendulum
+from typing import Optional
 
 app = FastAPI()
 
-@app.get("/")
-async def get_server_time():
+def format_gmt_offset(dt: pendulum.DateTime) -> str:
     """
-    Fetch and return the current time from the NIST time server, including conversions to Asia/Kolkata and UTC.
+    Format the GMT offset accurately using pendulum's built-in offset handling.
+    Returns format like 'GMT +5:30' or 'GMT -4:00'
+    """
+    # Get total offset in seconds
+    offset_seconds = dt.offset
+    
+    # Convert to hours and minutes
+    total_minutes = offset_seconds // 60
+    hours = total_minutes // 60
+    minutes = abs(total_minutes % 60)
+    
+    # Determine sign
+    sign = '+' if offset_seconds >= 0 else '-'
+    
+    return f"GMT {sign}{abs(hours):02d}:{minutes:02d}"
 
+@app.get("/time")
+async def get_server_time(timezone: str = "America/Argentina/San_Juan"):
+    """
+    Fetch current time from NIST server and return UTC, GMT, and local timezone times
+    with accurate offset calculations.
+    
+    Args:
+        timezone (str): Target timezone (default: "Asia/Kolkata")
+    
     Returns:
-        dict: A dictionary containing:
-            - 'utc_time': UTC time in ISO format.
-            - 'kolkata_time': Time in Asia/Kolkata timezone in ISO format.
-            - 'server_time': Original server time in UTC as previously provided.
+        dict: Contains UTC, GMT, and local timezone times with precise offsets
     """
     try:
-        # Create an instance of the NTPClient
-        c = ntplib.NTPClient()
+        # Get NTP time
+        client = ntplib.NTPClient()
+        response = client.request("time.nist.gov", version=3)
         
-        # Query the time server
-        response = c.request('time.nist.gov', version=3)
+        # Get UTC time
+        utc_dt = pendulum.from_timestamp(response.tx_time)
         
-        # Convert the timestamp to a datetime object with UTC timezone
-        server_time = datetime.fromtimestamp(response.tx_time, timezone.utc)
+        # Convert to requested timezone
+        local_dt = utc_dt.in_timezone(timezone)
         
-        # Calculate Asia/Kolkata time using pytz
-        kolkata_tz = pytz.timezone('Asia/Kolkata')
-        kolkata_time = server_time.astimezone(kolkata_tz)
+        # Calculate precise offset
+        offset_seconds = local_dt.offset
+        offset_hours = offset_seconds / 3600  
         
-        # UTC time is already in UTC, but we'll format it for consistency
-        utc_time = server_time
-
+        # Get GMT format with offset
+        gmt_format = format_gmt_offset(local_dt)
+        
         return {
-            "server_time": server_time.isoformat(),
-            "kolkata_time": kolkata_time.isoformat(),
-            "utc_time": utc_time.isoformat()
+            "timestamp": int(response.tx_time),
+            "times": {
+                "utc": {
+                    "date": utc_dt.format('YYYY-MM-DD'),
+                    "time": utc_dt.format('HH:mm:ss'),
+                    "timezone": "UTC",
+                    "offset_seconds": 0,
+                    "offset_hours": 0
+                },
+                "gmt": {
+                    "date": local_dt.format('YYYY-MM-DD'),
+                    "time": local_dt.format('HH:mm:ss'),
+                    "timezone": gmt_format,
+                    "offset_seconds": offset_seconds,
+                    "offset_hours": offset_hours
+                },
+                "local": {
+                    "date": local_dt.format('YYYY-MM-DD'),
+                    "time": local_dt.format('HH:mm:ss'),
+                    "timezone": timezone,
+                    "offset_seconds": offset_seconds,
+                    "offset_hours": offset_hours,
+                    "is_dst": local_dt.is_dst()  
+                }
+            },
+            "status": "success"
         }
-    
+        
     except ntplib.NTPException as e:
-        return {"error": f"Could not fetch time from server: {str(e)}"}
+        return {
+            "status": "error",
+            "message": f"NTP server error: {str(e)}"
+        }
+    except pendulum.exceptions.ParserError as e:
+        return {
+            "status": "error",
+            "message": f"Invalid timezone: {str(e)}"
+        }
 
 if __name__ == "__main__":
     import uvicorn
